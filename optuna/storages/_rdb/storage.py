@@ -805,8 +805,9 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
         study_id: int,
         deepcopy: bool = True,
         states: Optional[Container[TrialState]] = None,
+        lean: bool = False,
     ) -> List[FrozenTrial]:
-        trials = self._get_trials(study_id, states, set(), -1)
+        trials = self._get_trials(study_id, states, set(), -1, lean)
 
         return copy.deepcopy(trials) if deepcopy else trials
 
@@ -816,6 +817,7 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
         states: Optional[Container[TrialState]],
         included_trial_ids: Set[int],
         trial_id_greater_than: int,
+        lean: bool = False,
     ) -> List[FrozenTrial]:
         included_trial_ids = set(
             trial_id for trial_id in included_trial_ids if trial_id <= trial_id_greater_than
@@ -826,14 +828,18 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
             models.StudyModel.find_or_raise_by_id(study_id, session)
             query = (
                 session.query(models.TrialModel)
-                .options(sqlalchemy_orm.selectinload(models.TrialModel.params))
                 .options(sqlalchemy_orm.selectinload(models.TrialModel.values))
-                .options(sqlalchemy_orm.selectinload(models.TrialModel.user_attributes))
-                .options(sqlalchemy_orm.selectinload(models.TrialModel.system_attributes))
-                .options(sqlalchemy_orm.selectinload(models.TrialModel.intermediate_values))
                 .filter(
                     models.TrialModel.study_id == study_id,
                 )
+            )
+
+            if not lean:
+                query = (query
+                .options(sqlalchemy_orm.selectinload(models.TrialModel.params))
+                .options(sqlalchemy_orm.selectinload(models.TrialModel.user_attributes))
+                .options(sqlalchemy_orm.selectinload(models.TrialModel.system_attributes))
+                .options(sqlalchemy_orm.selectinload(models.TrialModel.intermediate_values))
             )
 
             if states is not None:
@@ -873,11 +879,11 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
                     if t.trial_id in included_trial_ids or t.trial_id > trial_id_greater_than
                 ]
 
-            trials = [self._build_frozen_trial_from_trial_model(trial) for trial in trial_models]
+            trials = [self._build_frozen_trial_from_trial_model(trial, lean) for trial in trial_models]
 
         return trials
 
-    def _build_frozen_trial_from_trial_model(self, trial: "models.TrialModel") -> FrozenTrial:
+    def _build_frozen_trial_from_trial_model(self, trial: "models.TrialModel", lean: bool = False) -> FrozenTrial:
         values: Optional[List[float]]
         if trial.values:
             values = [0 for _ in trial.values]
@@ -888,7 +894,10 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
         else:
             values = None
 
-        params = sorted(trial.params, key=lambda p: p.param_id)
+        params = sorted(trial.params, key=lambda p: p.param_id) if not lean else []
+        user_attributes = trial.user_attributes if not lean else []
+        system_attributes = trial.system_attributes if not lean else []
+        intermediate_values = trial.intermediate_values if not lean else []
 
         return FrozenTrial(
             number=trial.number,
@@ -907,15 +916,15 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
                 p.param_name: distributions.json_to_distribution(p.distribution_json)
                 for p in params
             },
-            user_attrs={attr.key: json.loads(attr.value_json) for attr in trial.user_attributes},
+            user_attrs={attr.key: json.loads(attr.value_json) for attr in user_attributes},
             system_attrs={
-                attr.key: json.loads(attr.value_json) for attr in trial.system_attributes
+                attr.key: json.loads(attr.value_json) for attr in system_attributes
             },
             intermediate_values={
                 v.step: models.TrialIntermediateValueModel.stored_repr_to_intermediate_value(
                     v.intermediate_value, v.intermediate_value_type
                 )
-                for v in trial.intermediate_values
+                for v in intermediate_values
             },
             trial_id=trial.trial_id,
         )
